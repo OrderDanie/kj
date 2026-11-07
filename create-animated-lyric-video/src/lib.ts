@@ -75,8 +75,8 @@ export const C = {
 };
 
 export const FONT_JP =
-  '"Noto Sans JP","Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic","YuGothic","Meiryo","Noto Sans CJK JP","Segoe UI",system-ui,sans-serif';
-export const FONT_MONO = '"SF Mono","Cascadia Mono","Consolas","Noto Sans Mono","Noto Sans JP",monospace';
+  '"Noto Sans JP Variable","Noto Sans JP","Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic","YuGothic","Meiryo","Noto Sans CJK JP","Segoe UI",system-ui,sans-serif';
+export const FONT_MONO = '"SF Mono","Cascadia Mono","Consolas","Noto Sans Mono","Noto Sans JP Variable","Noto Sans JP",monospace';
 
 /** typewriter helper */
 export const typed = (s: string, t: number, start: number, cps = 24) =>
