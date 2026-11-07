@@ -1,83 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import audioSrc from "./assets/playback.mp3";
-import { AISigil, GlobalDefs, MikuSigil, TieSigil, UiSigil } from "./parts";
-import { LYRICS, lineAt } from "./lyrics";
-import { SCENES, SCENE_FADE } from "./timeline";
-import { Pulse } from "./scenes/scenesA";
-import { C, DURATION, FONT_JP, beatInfo, clamp, easeOutBack, prog } from "./lib";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AISigil, MikuSigil, TieSigil, UiSigil } from "./parts";
+import { DURATION, FONT_JP, clamp } from "./lib";
+import { FilmStage } from "./Film";
+import { makeProjectSnapshot } from "./project";
+import { DEFAULT_AUDIO_URL } from "./audio";
+import ExportDialog from "./ExportDialog";
 
 const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-const wEst = (s: string) => Array.from(s).reduce((a, c) => a + (c.charCodeAt(0) < 256 ? (c === " " ? 0.3 : 0.58) : 1), 0);
-
-/* ───────────── kinetic lyric layer (sits on the 1920×1080 stage) ───────────── */
-function Lyrics({ t, en }: { t: number; en: boolean }) {
-  const line = lineAt(t);
-  const b = beatInfo(t);
-  return (
-    <>
-      <div
-        style={{
-          position: "absolute", left: 0, right: 0, bottom: 0, height: 420,
-          background: "linear-gradient(to top, rgba(8,8,12,.82), rgba(8,8,12,0))",
-          opacity: line ? 1 : 0, transition: "opacity .25s",
-        }}
-      />
-      {line && <LyricLine key={line.s} line={line} lt={t - line.s} pulse={b.pulse} en={en} />}
-    </>
-  );
-}
-
-function LyricLine({ line, lt, pulse, en }: { line: (typeof LYRICS)[number]; lt: number; pulse: number; en: boolean }) {
-  const chars = Array.from(line.jp);
-  const dur = line.e - line.s;
-  const fs = Math.max(62, Math.min(line.hot ? 142 : 128, 1720 / wEst(line.jp)));
-  const stagger = Math.min(0.055, (dur * 0.5) / chars.length);
-  const out = 1 - prog(lt, dur - 0.14, dur + 0.1);
-  const sc = 1 + (line.hot ? 0.055 * pulse : 0.015 * pulse);
-  const shadow = [[-1, -1], [1, -1], [-1, 1], [1, 1], [0, -1], [0, 1], [-1, 0], [1, 0]]
-    .map(([x, y]) => `${x * 5}px ${y * 5}px 0 ${C.ink}`)
-    .join(",");
-  return (
-    <>
-      <div
-        style={{
-          position: "absolute", left: 0, width: 1920, top: 800 - fs * 0.5, textAlign: "center", whiteSpace: "nowrap",
-          fontFamily: FONT_JP, fontWeight: 900, fontSize: fs, lineHeight: 1.1, color: C.bone,
-          textShadow: `${shadow}, 0 10px 24px rgba(0,0,0,.55)`, opacity: out,
-          transform: `scale(${sc})`, transformOrigin: "50% 60%",
-        }}
-      >
-        {chars.map((ch, k) => {
-          const p = easeOutBack(prog(lt, k * stagger, k * stagger + 0.24));
-          return (
-            <span
-              key={k}
-              style={{
-                display: "inline-block", whiteSpace: "pre", opacity: clamp(p * 2.2),
-                transform: `translateY(${(1 - p) * 46}px) scale(${0.55 + 0.45 * p}) rotate(${(1 - p) * -9}deg)`,
-                color: line.hot && /[A-Za-z!]/.test(ch) ? C.gold : C.bone,
-              }}
-            >
-              {ch}
-            </span>
-          );
-        })}
-      </div>
-      {en && (
-        <div
-          style={{
-            position: "absolute", left: 0, width: 1920, top: 800 + fs * 0.62, textAlign: "center",
-            fontFamily: FONT_JP, fontWeight: 500, fontStyle: "italic", fontSize: 36, color: C.paper,
-            textShadow: "0 2px 8px rgba(0,0,0,.9)", opacity: out * prog(lt, 0.2, 0.5) * 0.92, letterSpacing: 1,
-          }}
-        >
-          {line.en}
-        </div>
-      )}
-    </>
-  );
-}
-
 /* ───────────── small symbol legend for the start screen ───────────── */
 const Legend = () => {
   const items: { n: string; el: React.ReactNode }[] = [
@@ -107,9 +36,14 @@ export default function App() {
   const [dim, setDim] = useState({ w: window.innerWidth, h: window.innerHeight });
   const [uiShown, setUiShown] = useState(true);
   const [audioOk, setAudioOk] = useState(true);
+  const [soundtrack, setSoundtrack] = useState<File | null>(null);
+  const [bundledAudio, setBundledAudio] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const closeExport = useCallback(() => setExportOpen(false), []);
 
   const st = useRef({ t: 0, playing: false, last: 0, e: 0 });
   const audio = useRef<HTMLAudioElement | null>(null);
+  const soundtrackUrl = useRef<string | null>(null);
   const analyser = useRef<AnalyserNode | null>(null);
   const bins = useRef<Uint8Array | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
@@ -120,6 +54,40 @@ export default function App() {
     const onR = () => setDim({ w: window.innerWidth, h: window.innerHeight });
     window.addEventListener("resize", onR);
     return () => window.removeEventListener("resize", onR);
+  }, []);
+
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(DEFAULT_AUDIO_URL, { method: "HEAD", signal: controller.signal })
+      .then((r) => setBundledAudio(r.ok && Boolean(r.headers.get("content-type")?.toLowerCase().startsWith("audio/"))))
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => () => {
+    audio.current?.pause();
+    if (soundtrackUrl.current) URL.revokeObjectURL(soundtrackUrl.current);
+    void ctxRef.current?.close();
+  }, []);
+
+  const chooseSoundtrack = useCallback((file: File) => {
+    const oldUrl = soundtrackUrl.current;
+    const url = URL.createObjectURL(file);
+    soundtrackUrl.current = url;
+    setSoundtrack(file);
+    setAudioOk(true);
+    const a = audio.current;
+    if (a) {
+      a.pause();
+      a.onloadedmetadata = () => {
+        a.currentTime = Math.min(st.current.t, Math.max(0, a.duration - 0.05));
+        if (st.current.playing) void a.play().catch(() => setAudioOk(false));
+      };
+      a.src = url;
+      a.load();
+    }
+    if (oldUrl) URL.revokeObjectURL(oldUrl);
   }, []);
 
   /* master clock — locked to the audio element while the song plays */
@@ -158,7 +126,7 @@ export default function App() {
 
   const ensureAudio = useCallback(() => {
     if (audio.current) return audio.current;
-    const a = new Audio(audioSrc);
+    const a = new Audio(soundtrackUrl.current || DEFAULT_AUDIO_URL);
     a.preload = "auto";
     a.addEventListener("error", () => setAudioOk(false));
     audio.current = a;
@@ -229,6 +197,7 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
+      if (exportOpen || (ev.target instanceof HTMLElement && /^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(ev.target.tagName))) return;
       if (ev.code === "Space") { ev.preventDefault(); if (started) toggle(); else void play(); }
       else if (ev.key === "ArrowRight") seek(st.current.t + 5);
       else if (ev.key === "ArrowLeft") seek(st.current.t - 5);
@@ -237,7 +206,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [started, toggle, play, seek, toggleMute, fullscreen]);
+  }, [started, toggle, play, seek, toggleMute, fullscreen, exportOpen]);
 
   const poke = () => { idle.current = performance.now(); setUiShown(true); };
   useEffect(() => {
@@ -247,46 +216,19 @@ export default function App() {
   }, [playing]);
 
   const { t, e } = view;
-  const scale = Math.min(dim.w / 1920, dim.h / 1080);
-  const b = beatInfo(t);
   const ended = t >= DURATION - 0.01 && !playing;
-  const active = SCENES.filter((s) => t >= s.start && t < s.end + SCENE_FADE);
-  const cur = SCENES.find((s) => t >= s.start && t < s.end);
-  const punch = cur && cur.start > 0 ? 1 + 0.028 * Math.exp(-(t - cur.start) * 13) : 1;
+  const snapshot = useMemo(() => makeProjectSnapshot(en), [en]);
   const pct = (t / DURATION) * 100;
 
   return (
     <div ref={rootRef} className="relative h-full w-full select-none overflow-hidden bg-black" onMouseMove={poke} onClick={poke}>
-      {/* the 1920×1080 stage */}
-      <div
-        className="absolute overflow-hidden"
-        style={{ width: 1920, height: 1080, left: "50%", top: "50%", transform: `translate(-50%,-50%) scale(${scale})`, background: C.night }}
-        onClick={() => started && toggle()}
-      >
-        <svg viewBox="0 0 1920 1080" width="1920" height="1080" style={{ position: "absolute", inset: 0 }}>
-          <GlobalDefs />
-          <g transform={`translate(960 540) scale(${punch}) translate(-960 -540)`}>
-            {started
-              ? active.map((s) => {
-                  const lt = t - s.start;
-                  const op = s.start === 0 ? 1 : prog(t, s.start, s.start + SCENE_FADE);
-                  return (
-                    <g key={s.id} opacity={op}>
-                      {s.r({ t, lt, dur: s.end - s.start, b, e })}
-                    </g>
-                  );
-                })
-              : <Pulse t={t} lt={performance.now() / 1000} dur={99} b={b} e={0.2} />}
-          </g>
-        </svg>
-        {started && <Lyrics t={t} en={en} />}
-        <div className="grain" style={{ backgroundImage: NOISE() }} />
-      </div>
+      {/* the shared 1920×1080 stage */}
+      <FilmStage t={t} e={e} started={started} snapshot={snapshot} width={dim.w} height={dim.h} onClick={() => started && toggle()} />
 
       {/* start screen */}
       {!started && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/55 px-4">
-          <div className="rise w-full max-w-[640px] border border-[#d8ccb2]/30 bg-[#0c0d11]/90 p-7 text-[#efe6d2] shadow-2xl backdrop-blur-sm sm:p-9">
+          <div className="rise max-h-[calc(100vh-2rem)] w-full max-w-[640px] overflow-y-auto border border-[#d8ccb2]/30 bg-[#0c0d11]/90 p-7 text-[#efe6d2] shadow-2xl backdrop-blur-sm sm:p-9">
             <div className="mb-3 flex items-center justify-between font-mono text-[11px] tracking-[0.25em] text-[#c49a3c]">
               <span>日本異変調査局 特任研究班</span>
               <span className="border border-[#a23a4c] px-2 py-0.5 text-[#cf6b7b]">最高機密</span>
@@ -309,6 +251,14 @@ export default function App() {
               <svg width="18" height="18" viewBox="0 0 18 18"><path d="M3 1.5 L16 9 L3 16.5Z" fill="#17171c" /></svg>
               OPEN THE ARCHIVE
             </button>
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[#d8ccb2]/15 pt-4">
+              <label className="cursor-pointer font-mono text-[10px] tracking-widest text-[#d8ccb2]/75 hover:text-[#d3a24c]">
+                {soundtrack ? "✓ AUDIO SELECTED" : bundledAudio ? "CHOOSE OTHER AUDIO" : "CHOOSE SOUNDTRACK"}
+                <input className="sr-only" type="file" accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg,.webm,.aiff" onChange={(event) => { const file = event.target.files?.[0]; if (file) chooseSoundtrack(file); event.target.value = ""; }} />
+              </label>
+              <button onClick={() => setExportOpen(true)} className="border border-[#d3a24c]/70 px-3 py-2 font-mono text-[10px] tracking-widest text-[#d3a24c] hover:bg-[#d3a24c] hover:text-[#17171c]">EXPORT MP4 ↗</button>
+            </div>
+            {!soundtrack && !bundledAudio && <p className="mt-2 text-[11px] text-[#d8ccb2]/60">The original soundtrack is not bundled. Choose it for playback and export.</p>}
             <p className="mt-3 text-center text-[11px] tracking-wider text-[#d8ccb2]/60">
               Sound on · Space = play/pause · ←/→ = seek · M = mute · F = fullscreen
             </p>
@@ -338,7 +288,7 @@ export default function App() {
             onChange={(ev) => seek(parseFloat(ev.target.value))}
             aria-label="Seek"
           />
-          <div className="mt-1 flex items-center gap-4 text-sm">
+          <div className="mt-1 flex items-center gap-2 text-sm sm:gap-4">
             <button onClick={toggle} aria-label={playing ? "Pause" : "Play"} className="flex h-9 w-9 items-center justify-center rounded-full bg-[#efe6d2] text-[#17171c] hover:bg-[#d3a24c]">
               {playing ? (
                 <svg width="14" height="14" viewBox="0 0 14 14"><rect x="2" y="1" width="3.5" height="12" fill="#17171c" /><rect x="8.5" y="1" width="3.5" height="12" fill="#17171c" /></svg>
@@ -350,30 +300,14 @@ export default function App() {
             <span className="hidden truncate text-[#d8ccb2]/70 sm:inline" style={{ fontFamily: FONT_JP }}>プレイバック · Playback</span>
             {!audioOk && <span className="text-[#cf6b7b]">audio unavailable</span>}
             <span className="flex-1" />
+            <button onClick={() => setExportOpen(true)} className="font-mono text-xs tracking-widest text-[#d3a24c] hover:text-[#e0b866]">EXPORT</button>
             <button onClick={() => setEn((v) => !v)} className={`rounded border px-2 py-1 font-mono text-xs tracking-widest ${en ? "border-[#d3a24c] text-[#d3a24c]" : "border-[#d8ccb2]/40 text-[#d8ccb2]/70"}`}>EN</button>
             <button onClick={toggleMute} className="font-mono text-xs tracking-widest text-[#d8ccb2] hover:text-[#d3a24c]">{muted ? "MUTED" : "SOUND"}</button>
             <button onClick={fullscreen} className="font-mono text-xs tracking-widest text-[#d8ccb2] hover:text-[#d3a24c]">FULL</button>
           </div>
         </div>
       )}
+      <ExportDialog open={exportOpen} onClose={closeExport} english={en} soundtrack={soundtrack} onSoundtrack={chooseSoundtrack} bundledAudio={bundledAudio} />
     </div>
   );
-}
-
-/* film grain tile, generated once */
-let noiseUrl = "";
-function NOISE() {
-  if (noiseUrl) return noiseUrl;
-  const c = document.createElement("canvas");
-  c.width = c.height = 160;
-  const x = c.getContext("2d")!;
-  const d = x.createImageData(160, 160);
-  for (let i = 0; i < d.data.length; i += 4) {
-    const v = Math.random() * 255;
-    d.data[i] = d.data[i + 1] = d.data[i + 2] = v;
-    d.data[i + 3] = 255;
-  }
-  x.putImageData(d, 0, 0);
-  noiseUrl = `url(${c.toDataURL()})`;
-  return noiseUrl;
 }

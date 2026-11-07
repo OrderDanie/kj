@@ -63,9 +63,9 @@ export const LYRICS: Line[] = [
   { s: 133.25, e: 136.25, jp: "愛情殺して歌っている", en: "I'm singing, while killing my love" },
 ];
 
-export const lineAt = (t: number): Line | null => {
-  for (let i = 0; i < LYRICS.length; i++) {
-    const l = LYRICS[i];
+export const lineAt = (t: number, lines: Line[] = LYRICS): Line | null => {
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
     if (t >= l.s && t < l.e) return l;
   }
   return null;
